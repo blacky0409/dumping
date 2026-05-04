@@ -1,0 +1,983 @@
+[1mdiff --git a/check_phfrag.c b/check_phfrag.c[m
+[1mindex 3fdfe5d..9f3a923 100644[m
+[1m--- a/check_phfrag.c[m
+[1m+++ b/check_phfrag.c[m
+[36m@@ -182,11 +182,9 @@[m [mstatic bool is_next_correct(struct conv_ftl *conv_ftl, struct ppa *pre, struct p[m
+ 			}[m
+ 		}[m
+ 		if(next->g.ch == predict_next_ch && next->g.lun == predict_next_die){[m
+[31m-			*page_counter = false;[m
+ 			return 1;[m
+ 		}[m
+ 	}[m
+[31m-	*page_counter =true;[m
+ 	return 0;[m
+ }[m
+ [m
+[36m@@ -236,12 +234,8 @@[m [mbool phfrag_check(struct nvmev_dev * dev){[m
+ 		[m
+ 			cur_ppa = conv_ftl->maptbl[local_lpn];[m
+ 		[m
+[31m-			if(is_next_correct(conv_ftl,&prev_ppa, &cur_ppa,&page_counter))[m
+[32m+[m			[32mif(!is_next_correct(conv_ftl,&prev_ppa, &cur_ppa,&page_counter))[m
+ 			{[m
+[31m-				if(page_counter)[m
+[31m-					count++;[m
+[31m-			}[m
+[31m-			else{[m
+ 				count++;[m
+ 			}[m
+ [m
+[1mdiff --git a/conv_ftl.c b/conv_ftl.c[m
+[1mindex 1ac1a50..d6f6ff9 100644[m
+[1m--- a/conv_ftl.c[m
+[1m+++ b/conv_ftl.c[m
+[36m@@ -157,7 +157,7 @@[m [mstatic void remove_lines(struct conv_ftl *conv_ftl)[m
+         list_del_init(&node->entry);[m
+     }[m
+     list_for_each_entry_safe(node_2, tmp_2, &conv_ftl->lm.full_line_list, entry) {[m
+[31m-        list_del_init(&node->entry);[m
+[32m+[m[32m        list_del_init(&node_2->entry);[m
+     }[m
+ 	vfree(conv_ftl->lm.lines);[m
+ [m
+[36m@@ -1005,12 +1005,14 @@[m [mstatic bool conv_read(struct nvmev_ns *ns, struct nvmev_request *req, struct nvm[m
+ 			}[m
+ 		}[m
+ 	}[m
+[32m+[m	[32m//printk(KERN_INFO "size : %lld, real size : %lld\n",nr_lba,nr_lba/spp->secs_per_pg);[m
+ 	struct ppa prev_ppa;[m
+ 	struct nand_cmd srd = {[m
+ 		.type = USER_IO,[m
+ 		.cmd = NAND_READ,[m
+ 		.stime = nsecs_start,[m
+ 		.interleave_pci_dma = true,[m
+[32m+[m		[32m.arrive_time = -1,[m
+ 	};[m
+ [m
+ 	NVMEV_ASSERT(conv_ftls);[m
+[36m@@ -1079,11 +1081,28 @@[m [mstatic bool conv_read(struct nvmev_ns *ns, struct nvmev_request *req, struct nvm[m
+ 		}[m
+ 	}[m
+ [m
+[32m+[m	[32mns->p_dev->queueing_wait += srd.arrive_time;[m
+ 	ret->nsecs_target = nsecs_latest;[m
+ 	ret->status = NVME_SC_SUCCESS;[m
+ 	return true;[m
+ }[m
+ [m
+[32m+[m[32mvoid track_write(struct write_pattern_stats *stats, uint64_t start_lpn) {[m
+[32m+[m[32m    if (stats->total_writes > 0) {[m
+[32m+[m[32m        int64_t delta = (int64_t)start_lpn - (int64_t)stats->prev_lpn;[m
+[32m+[m[32m        uint64_t abs_delta = delta < 0 ? -delta : delta;[m
+[32m+[m
+[32m+[m[32m        if (abs_delta <= 8)[m
+[32m+[m[32m            stats->sequential_writes++;[m
+[32m+[m[32m        if (abs_delta > 1024)[m
+[32m+[m[32m            stats->large_jump_writes++;[m
+[32m+[m
+[32m+[m[32m        stats->lpn_delta_sum += abs_delta;[m
+[32m+[m[32m    }[m
+[32m+[m[32m    stats->prev_lpn = start_lpn;[m
+[32m+[m[32m    stats->total_writes++;[m
+[32m+[m[32m}[m
+[32m+[m
+ static bool conv_write(struct nvmev_ns *ns, struct nvmev_request *req, struct nvmev_result *ret)[m
+ {[m
+ 	struct conv_ftl *conv_ftls = (struct conv_ftl *)ns->ftls;[m
+[36m@@ -1112,7 +1131,10 @@[m [mstatic bool conv_write(struct nvmev_ns *ns, struct nvmev_request *req, struct nv[m
+ 		.interleave_pci_dma = false,[m
+ 		.xfer_size = spp->pgsz * spp->pgs_per_oneshotpg,[m
+ 	};[m
+[31m-	[m
+[32m+[m
+[32m+[m	[32mif(ns->stats->start==1)[m
+[32m+[m		[32mtrack_write(ns->stats,start_lpn);[m
+[32m+[m
+ 	NVMEV_DEBUG_VERBOSE("%s: start_lpn=%lld, len=%lld, end_lpn=%lld", __func__, start_lpn,[m
+ 		nr_lba,end_lpn);[m
+ 	if ((end_lpn / nr_parts) >= spp->tt_pgs) {[m
+[36m@@ -1233,7 +1255,7 @@[m [mbool conv_proc_nvme_io_cmd(struct nvmev_ns *ns, struct nvmev_request *req, struc[m
+ [m
+ 	return true;[m
+ }[m
+[31m-static struct rewrite_pointer * advance_write_pointer_cleanver(struct conv_ftl *conv_ftl, uint64_t degree,bool no_return, int * counter, int *conti)[m
+[32m+[m[32mstatic struct rewrite_pointer * advance_write_pointer_cleanver(struct conv_ftl *conv_ftl, uint64_t degree,bool no_return, int * counter, int *conti,bool final)[m
+ {[m
+ 	uint32_t io_type=USER_IO;[m
+ 	struct ssdparams *spp = &conv_ftl->ssd->sp;[m
+[36m@@ -1248,37 +1270,43 @@[m [mstatic struct rewrite_pointer * advance_write_pointer_cleanver(struct conv_ftl *[m
+ 	[m
+ 	//printk(KERN_INFO "ch: %d lun: %d pg : %d counter: %d\n",wpp->ch, wpp->lun, wpp->pg, page_counter[idx]);[m
+ 	check_addr(conv_ftl->page_counter[idx], spp->pgs_per_blk);[m
+[31m-//	(*counter)++;[m
+[32m+[m	[32m(*counter)++;[m
+ 	conv_ftl->page_counter[idx]++;[m
+ 	if ((conv_ftl->page_counter[idx] % spp->pgs_per_oneshotpg) != 0)	[m
+ 		goto out;[m
+ 	[m
+[31m-[m
+[31m-	if((*conti) >= 0){[m
+[31m-		(*conti)++;[m
+[31m-		if((*conti) >= spp->max_con)[m
+[31m-			(*conti) = -1;[m
+[31m-		if(conv_ftl->page_counter[idx] >= spp->pgs_per_blk || (*counter)>= 16*spp->pgs_per_oneshotpg){[m
+[31m-			r = vmalloc(sizeof(struct rewrite_pointer)); [m
+[31m-			r->ch = wpp->ch;[m
+[31m-			r->lun = wpp->lun;[m
+[31m-		}[m
+[31m-		else[m
+[31m-			goto out;	[m
+[31m-[m
+[31m-	}else{[m
+[31m-[m
+[31m-		random_value = get_random_int() % 100 ;[m
+[31m-[m
+[31m-		if(degree > random_value){ //fragmentation case[m
+[31m-			(*conti) = 0;[m
+[31m-			if(conv_ftl->page_counter[idx] >= spp->pgs_per_blk || (*counter) >= 16* spp->pgs_per_oneshotpg){[m
+[32m+[m[41m	[m
+[32m+[m	[32mif(!final){[m
+[32m+[m		[32mif((*conti) >= 0){[m
+[32m+[m			[32m(*conti)++;[m
+[32m+[m			[32mif((*conti) >= spp->max_con)[m
+[32m+[m				[32m(*conti) = -1;[m
+[32m+[m			[32mif((*counter)>= 2 * spp->pgs_per_oneshotpg){[m
+ 				r = vmalloc(sizeof(struct rewrite_pointer)); [m
+ 				r->ch = wpp->ch;[m
+ 				r->lun = wpp->lun;[m
+ 			}[m
+[31m-			else[m
+[32m+[m			[32melse if(conv_ftl->page_counter[idx] < spp->pgs_per_blk){[m
+ 				goto out;	[m
+[32m+[m			[32m}[m
+[32m+[m			[32melse{[m
+[32m+[m				[32m(*conti) --;[m
+[32m+[m			[32m}[m
+[32m+[m
+[32m+[m		[32m}else{[m
+[32m+[m
+[32m+[m			[32mrandom_value = get_random_int() % 100 ;[m
+[32m+[m
+[32m+[m			[32mif(degree > random_value){ //fragmentation case[m
+[32m+[m				[32m(*conti) = 0;[m
+[32m+[m				[32mif((*counter) >= 2 * spp->pgs_per_oneshotpg){[m
+[32m+[m					[32mr = vmalloc(sizeof(struct rewrite_pointer));[m[41m [m
+[32m+[m					[32mr->ch = wpp->ch;[m
+[32m+[m					[32mr->lun = wpp->lun;[m
+[32m+[m				[32m}[m
+[32m+[m				[32melse if(conv_ftl->page_counter[idx] < spp->pgs_per_blk)[m
+[32m+[m					[32mgoto out;[m[41m	[m
+[32m+[m			[32m}[m
+ 		}[m
+ 	}[m
+ [m
+[36m@@ -1352,7 +1380,7 @@[m [mout:[m
+ 	return r;[m
+ }[m
+ [m
+[31m-struct rewrite_pointer * phfrag_cleaner(struct nvmev_ns *ns, uint64_t start_lpn,uint64_t end_lpn,uint64_t degree,struct list_head * preempt_list, int idx, bool force, bool no_return,int * con, long num_list, int cur_chunk, int * conti){[m
+[32m+[m[32m/*struct rewrite_pointer * phfrag_cleaner(struct nvmev_ns *ns, uint64_t start_lpn,uint64_t end_lpn,uint64_t degree, int idx, bool force, bool no_return,int * con, long num_list, int cur_chunk, int * conti){[m
+ [m
+ 	struct conv_ftl *conv_ftls = (struct conv_ftl *)ns->ftls;[m
+ 	struct conv_ftl *conv_ftl = &conv_ftls[idx];[m
+[36m@@ -1364,28 +1392,7 @@[m [mstruct rewrite_pointer * phfrag_cleaner(struct nvmev_ns *ns, uint64_t start_lpn,[m
+ 	uint64_t lpn;[m
+ 	uint32_t nr_parts = ns->nr_parts;[m
+ [m
+[31m-	if(!force && list_empty(&preempt_list[idx * num_list + cur_chunk])){[m
+[31m-		force=true;[m
+[31m-	}[m
+ 	for (lpn = start_lpn; lpn <= end_lpn; lpn+=nr_parts) {[m
+[31m-		if(force == false && no_return == false){[m
+[31m-			struct write_pointer *wpp = __get_wp(conv_ftl, USER_IO);[m
+[31m-			int premmpt_counter = 0;[m
+[31m-			lba_chunk_t * prem,*tmp;[m
+[31m-[m
+[31m-    		list_for_each_entry_safe(prem, tmp, &preempt_list[idx * num_list + cur_chunk], list) {[m
+[31m-				if(wpp->ch == prem->ch && wpp->lun == prem->lun){[m
+[31m-					r = vmalloc(sizeof(struct rewrite_pointer)); [m
+[31m-					r->ch = -1;[m
+[31m-					r->lun = -1;[m
+[31m-					r->startpoint = lpn;[m
+[31m-					r->preempt = true;[m
+[31m-					r->preempt_counter = premmpt_counter;[m
+[31m-					return r;[m
+[31m-				}[m
+[31m-				premmpt_counter++;[m
+[31m-			}[m
+[31m-		}[m
+ 		uint64_t local_lpn;[m
+ 		struct ppa ppa;[m
+ [m
+[36m@@ -1397,6 +1404,7 @@[m [mstruct rewrite_pointer * phfrag_cleaner(struct nvmev_ns *ns, uint64_t start_lpn,[m
+ 			set_rmap_ent(conv_ftl, INVALID_LPN, &ppa);[m
+ 			NVMEV_DEBUG("%s: %lld is invalid, ", __func__, ppa2pgidx(conv_ftl, &ppa));[m
+ 		}[m
+[32m+[m[41m		[m
+ [m
+ 		ppa = get_new_page(conv_ftl, USER_IO);[m
+ 	[m
+[36m@@ -1407,21 +1415,17 @@[m [mstruct rewrite_pointer * phfrag_cleaner(struct nvmev_ns *ns, uint64_t start_lpn,[m
+ [m
+ 		mark_page_valid(conv_ftl, &ppa);[m
+ [m
+[31m-		r = advance_write_pointer_cleanver(conv_ftl,degree,no_return,con,conti);[m
+[32m+[m		[32mbool final=false;[m
+[32m+[m		[32mif(lpn+nr_parts > end_lpn)[m
+[32m+[m			[32mfinal=true;[m
+[32m+[m
+[32m+[m		[32mr = advance_write_pointer_cleanver(conv_ftl,degree,no_return,con,conti,final);[m
+ [m
+ 		consume_write_credit(conv_ftl);[m
+ [m
+ 		check_and_refill_write_credit(conv_ftl);[m
+ [m
+ 		if(r != NULL){[m
+[31m-			r->startpoint = lpn + nr_parts;[m
+[31m-			if(r->startpoint > end_lpn){ [m
+[31m-				vfree(r);[m
+[31m-				return NULL;[m
+[31m-			}[m
+[31m-			r->preempt = false;[m
+[31m-			return r;[m
+[31m-		}else if(*con >= 16 * spp->pgs_per_oneshotpg){[m
+ 			if((lpn+nr_parts) > end_lpn){ [m
+ 				return NULL;[m
+ 			}[m
+[36m@@ -1434,23 +1438,44 @@[m [mstruct rewrite_pointer * phfrag_cleaner(struct nvmev_ns *ns, uint64_t start_lpn,[m
+ 		}[m
+ 	}[m
+ 	return NULL;[m
+[31m-}[m
+[31m-/*[m
+[31m-void phfrag_cleaner(struct nvmev_ns *ns, uint64_t start_lpn,uint64_t end_lpn){[m
+[32m+[m[32m}*/[m
+[32m+[m[32mstruct rewrite_pointer * phfrag_cleaner(struct nvmev_ns *ns, uint64_t start_lpn,uint64_t end_lpn,uint64_t degree,struct list_head * preempt_list, int idx, bool force, bool no_return,int * con, long num_list, int cur_chunk, int * conti){[m
+[32m+[m
+ 	struct conv_ftl *conv_ftls = (struct conv_ftl *)ns->ftls;[m
+[31m-	struct conv_ftl *conv_ftl = &conv_ftls[0];[m
+[32m+[m	[32mstruct conv_ftl *conv_ftl = &conv_ftls[idx];[m
+ [m
+ 	struct ssdparams *spp = &conv_ftl->ssd->sp;[m
+ [m
+[32m+[m	[32mstruct rewrite_pointer * r= NULL;[m
+[32m+[m
+ 	uint64_t lpn;[m
+ 	uint32_t nr_parts = ns->nr_parts;[m
+ [m
+[31m-	for (lpn = start_lpn; lpn <= end_lpn; lpn++) {[m
+[32m+[m	[32mif(!force && list_empty(&preempt_list[idx * num_list + cur_chunk])){[m
+[32m+[m		[32mforce=true;[m
+[32m+[m	[32m}[m
+[32m+[m	[32mfor (lpn = start_lpn; lpn <= end_lpn; lpn+=nr_parts) {[m
+[32m+[m		[32mif(force == false && no_return == false){[m
+[32m+[m			[32mstruct write_pointer *wpp = __get_wp(conv_ftl, USER_IO);[m
+[32m+[m			[32mint premmpt_counter = 0;[m
+[32m+[m			[32mlba_chunk_t * prem,*tmp;[m
+[32m+[m
+[32m+[m[41m    [m		[32mlist_for_each_entry_safe(prem, tmp, &preempt_list[idx * num_list + cur_chunk], list) {[m
+[32m+[m				[32mif(wpp->ch == prem->ch && wpp->lun == prem->lun){[m
+[32m+[m					[32mr = vmalloc(sizeof(struct rewrite_pointer));[m
+[32m+[m					[32mr->ch = -1;[m
+[32m+[m					[32mr->lun = -1;[m
+[32m+[m					[32mr->startpoint = lpn;[m
+[32m+[m					[32mr->preempt = true;[m
+[32m+[m					[32mr->preempt_counter = premmpt_counter;[m
+[32m+[m					[32mreturn r;[m
+[32m+[m				[32m}[m
+[32m+[m				[32mpremmpt_counter++;[m
+[32m+[m			[32m}[m
+[32m+[m		[32m}[m
+ 		uint64_t local_lpn;[m
+ 		struct ppa ppa;[m
+[31m-	//	struct write_flow_control *wfc;[m
+ [m
+[31m-		conv_ftl = &conv_ftls[lpn % nr_parts];[m
+ 		local_lpn = lpn / nr_parts;[m
+ 		ppa = get_maptbl_ent([m
+ 			conv_ftl, local_lpn);[m
+[36m@@ -1469,12 +1494,36 @@[m [mvoid phfrag_cleaner(struct nvmev_ns *ns, uint64_t start_lpn,uint64_t end_lpn){[m
+ [m
+ 		mark_page_valid(conv_ftl, &ppa);[m
+ [m
+[31m-		advance_write_pointer(conv_ftl, USER_IO);[m
+[32m+[m		[32mbool final=false;[m
+[32m+[m
+[32m+[m		[32mr = advance_write_pointer_cleanver(conv_ftl,degree,no_return,con,conti,final);[m
+ [m
+ 		consume_write_credit(conv_ftl);[m
+[32m+[m
+ 		check_and_refill_write_credit(conv_ftl);[m
+[32m+[m
+[32m+[m		[32mif(r != NULL){[m
+[32m+[m			[32mr->startpoint = lpn + nr_parts;[m
+[32m+[m			[32mif(r->startpoint > end_lpn){[m
+[32m+[m				[32mvfree(r);[m
+[32m+[m				[32mreturn NULL;[m
+[32m+[m			[32m}[m
+[32m+[m			[32mr->preempt = false;[m
+[32m+[m			[32mreturn r;[m
+[32m+[m		[32m}else if(*con >= 16 * spp->pgs_per_oneshotpg){[m
+[32m+[m			[32mif((lpn+nr_parts) > end_lpn){[m
+[32m+[m				[32mreturn NULL;[m
+[32m+[m			[32m}[m
+[32m+[m			[32mr = vmalloc(sizeof(struct rewrite_pointer));[m
+[32m+[m			[32mr->ch = -1;[m
+[32m+[m			[32mr->lun = -1;[m
+[32m+[m			[32mr->startpoint = lpn + nr_parts;[m
+[32m+[m			[32mr->preempt = false;[m
+[32m+[m			[32mreturn r;[m
+[32m+[m		[32m}[m
+ 	}[m
+[31m-}*/[m
+[32m+[m	[32mreturn NULL;[m
+[32m+[m[32m}[m
+ void remove_ftl_shortcut(struct conv_ftl *conv_ftls, uint64_t nr_parts){[m
+ 	uint32_t i;[m
+ 	for(i=0; i < nr_parts;i++){[m
+[1mdiff --git a/conv_ftl.h b/conv_ftl.h[m
+[1mindex 13c6882..4d8ce6b 100644[m
+[1m--- a/conv_ftl.h[m
+[1m+++ b/conv_ftl.h[m
+[36m@@ -110,7 +110,8 @@[m [mvoid conv_remove_namespace(struct nvmev_ns *ns);[m
+ bool conv_proc_nvme_io_cmd(struct nvmev_ns *ns, struct nvmev_request *req, struct nvmev_result *ret,[m
+ 			   struct nvmev_dev *nvmev_vdev);[m
+ [m
+[31m-struct rewrite_pointer * phfrag_cleaner(struct nvmev_ns *ns, uint64_t start_lpn,uint64_t end_lpn,uint64_t degree,struct list_head * preempt_list, int idx, bool force, bool no_return, int *con, long num_list, int cur_chunk, int * conti);[m
+[32m+[m[32m//struct rewrite_pointer * phfrag_cleaner(struct nvmev_ns *ns, uint64_t start_lpn,uint64_t end_lpn,uint64_t degree, int idx, bool force, bool no_return, int *con, long num_list, int cur_chunk, int * conti);[m
+[32m+[m[32mstruct rewrite_pointer * phfrag_cleaner(struct nvmev_ns *ns, uint64_t start_lpn,uint64_t end_lpn,uint64_t degree,struct list_head * preempt_list, int idx, bool force, bool no_return,int * con, long num_list, int cur_chunk, int * conti);[m
+ void conv_remove_ftl(struct conv_ftl *conv_ftl);[m
+ void remove_ftl_shortcut(struct conv_ftl *conv_ftls, uint64_t nr_parts);[m
+ void init_ftl_shortcut(struct conv_ftl *conv_ftls, uint64_t nr_parts);[m
+[1mdiff --git a/io.c b/io.c[m
+[1mindex 68609e8..b682166 100644[m
+[1m--- a/io.c[m
+[1m+++ b/io.c[m
+[36m@@ -51,6 +51,10 @@[m [mstatic unsigned int __do_perform_io(int sqid, int sq_entry, struct nvmev_dev *nv[m
+ 	length = (cmd->length + 1) << 9;[m
+ 	remaining = length;[m
+ [m
+[32m+[m
+[32m+[m	[32mbool first_io = true;[m
+[32m+[m	[32mu64 old_paddr;[m
+[32m+[m
+ 	while (remaining) {[m
+ 		size_t io_size;[m
+ 		void *vaddr;[m
+[36m@@ -74,6 +78,13 @@[m [mstatic unsigned int __do_perform_io(int sqid, int sq_entry, struct nvmev_dev *nv[m
+ [m
+ 		io_size = min_t(size_t, remaining, PAGE_SIZE);[m
+ [m
+[32m+[m		[32mif(!first_io && nvmev_vdev->hugemap_checker == 1){[m
+[32m+[m			[32mif(old_paddr + PAGE_SIZE != paddr){[m
+[32m+[m				[32mnvmev_vdev->conti_counter++;[m
+[32m+[m			[32m}[m
+[32m+[m			[32mnvmev_vdev->count_page++;[m
+[32m+[m		[32m}[m
+[32m+[m
+ 		if (paddr & PAGE_OFFSET_MASK) {[m
+ 			mem_offs = paddr & PAGE_OFFSET_MASK;[m
+ 			if (io_size + mem_offs > PAGE_SIZE)[m
+[36m@@ -90,6 +101,8 @@[m [mstatic unsigned int __do_perform_io(int sqid, int sq_entry, struct nvmev_dev *nv[m
+ [m
+ 		remaining -= io_size;[m
+ 		offset += io_size;[m
+[32m+[m		[32mold_paddr= paddr;[m
+[32m+[m		[32mfirst_io=false;[m
+ 	}[m
+ [m
+ 	if (paddr_list != NULL)[m
+[36m@@ -119,6 +132,9 @@[m [mstatic unsigned int __do_perform_io_using_dma(int sqid, int sq_entry, struct nvm[m
+ 	length = (cmd->length + 1) << 9;[m
+ 	remaining = length;[m
+ [m
+[32m+[m	[32mbool first_io = true;[m[41m	[m
+[32m+[m	[32mu64 pre_paddr;[m
+[32m+[m
+ 	memset(paddr_list, 0, sizeof(paddr_list));[m
+ 	/* Loop to get the PRP list */[m
+ 	while (remaining) {[m
+[36m@@ -138,6 +154,8 @@[m [mstatic unsigned int __do_perform_io_using_dma(int sqid, int sq_entry, struct nvm[m
+ 			paddr_list[prp_offs] = tmp_paddr_list[prp2_offs++];[m
+ 		}[m
+ [m
+[32m+[m		[32mpaddr = paddr_list[prp_offs];[m
+[32m+[m
+ 		io_size = min_t(size_t, remaining, PAGE_SIZE);[m
+ [m
+ 		if (paddr_list[prp_offs] & PAGE_OFFSET_MASK) {[m
+[36m@@ -146,7 +164,16 @@[m [mstatic unsigned int __do_perform_io_using_dma(int sqid, int sq_entry, struct nvm[m
+ 				io_size = PAGE_SIZE - mem_offs;[m
+ 		}[m
+ [m
+[32m+[m		[32mif(!first_io && nvmev_vdev->hugemap_checker == 1){[m
+[32m+[m			[32mif(pre_paddr + PAGE_SIZE != paddr){[m
+[32m+[m				[32mnvmev_vdev->conti_counter++;[m
+[32m+[m			[32m}[m
+[32m+[m			[32mnvmev_vdev->count_page++;[m
+[32m+[m		[32m}[m
+[32m+[m
+ 		remaining -= io_size;[m
+[32m+[m		[32mfirst_io = false;[m
+[32m+[m		[32mpre_paddr = paddr;[m
+ 	}[m
+ 	num_prps = prp_offs;[m
+ [m
+[1mdiff --git a/main.c b/main.c[m
+[1mindex cc29c11..336fedb 100644[m
+[1m--- a/main.c[m
+[1m+++ b/main.c[m
+[36m@@ -351,6 +351,11 @@[m [mstatic ssize_t __sysfs_show(struct kobject *kobj, struct kobj_attribute *attr, c[m
+ 		}[m
+ [m
+ 		len = sprintf(buf, "%llu %llu\n", cfg->ch_die_counter, cfg->ch_die_latency);[m
+[32m+[m	[32m} else if (!strcmp(file_name, "hugemap_checker")){[m
+[32m+[m		[32mstruct nvmev_ns *ns = (struct nvmev_ns *)nvmev_vdev->ns;[m
+[32m+[m		[32mlen = sprintf(buf, "%lld %lld %lld %lld\n", ns->stats->sequential_writes,ns->stats->large_jump_writes,ns->stats->lpn_delta_sum,ns->stats->total_writes);[m
+[32m+[m	[32m} else if (!strcmp(file_name, "qing")){[m
+[32m+[m		[32mlen = sprintf(buf, "%lld\n", nvmev_vdev->queueing_wait);[m
+ 	}[m
+ 	return len;[m
+ }[m
+[36m@@ -431,6 +436,7 @@[m [mstatic ssize_t __sysfs_store(struct kobject *kobj, struct kobj_attribute *attr,[m
+ 				ssd->count=0;[m
+ 				ssd->checking = true;[m
+ 			}[m
+[32m+[m			[32mnvmev_vdev->queueing_wait = 0;[m
+ 		}[m
+ 		else{[m
+ 				for(q=0;q < nvmev_vdev->ns->nr_parts; q++){[m
+[36m@@ -439,8 +445,13 @@[m [mstatic ssize_t __sysfs_store(struct kobject *kobj, struct kobj_attribute *attr,[m
+ 				}[m
+ 				//int hi = ch_die_check(nvmev_vdev,true);[m
+ 			}[m
+[32m+[m	[32m} else if (!strcmp(file_name, "hugemap_checker")){[m
+[32m+[m		[32mstruct nvmev_ns *ns = (struct nvmev_ns *)nvmev_vdev->ns;[m
+[32m+[m		[32mret =  sscanf(buf, "%d", &ns->stats->start);[m
+[32m+[m		[32mif(ns->stats->start == 1){[m
+[32m+[m			[32mns->stats->total_writes=0;[m
+[32m+[m		[32m}[m[41m	[m
+ 	}[m
+[31m-	[m
+ [m
+ out:[m
+ 	__print_perf_configs(nvmev_vdev);[m
+[36m@@ -457,6 +468,8 @@[m [mstatic struct kobj_attribute stat_attr = __ATTR(stat, 0644, __sysfs_show, __sysf[m
+ static struct kobj_attribute debug_attr = __ATTR(debug, 0644, __sysfs_show, __sysfs_store);[m
+ static struct kobj_attribute phfrag_checking = __ATTR(phfrag, 0664, __sysfs_show, __sysfs_store);[m
+ static struct kobj_attribute chdie_checking = __ATTR(chdie, 0664, __sysfs_show, __sysfs_store);[m
+[32m+[m[32mstatic struct kobj_attribute hugemap_checking = __ATTR(hugemap_checker, 0664, __sysfs_show, __sysfs_store);[m
+[32m+[m[32mstatic struct kobj_attribute qing_checking = __ATTR(qing, 0664, __sysfs_show, __sysfs_store);[m
+ [m
+ void NVMEV_STORAGE_INIT(struct nvmev_dev *nvmev_vdev)[m
+ {[m
+[36m@@ -485,6 +498,8 @@[m [mvoid NVMEV_STORAGE_INIT(struct nvmev_dev *nvmev_vdev)[m
+ 	nvmev_vdev->sysfs_debug = &debug_attr;[m
+ 	nvmev_vdev->sysfs_phfrag = &phfrag_checking;[m
+ 	nvmev_vdev->sysfs_chdie = &chdie_checking;[m
+[32m+[m	[32mnvmev_vdev->sysfs_hugemap = &hugemap_checking;[m
+[32m+[m	[32mnvmev_vdev->sysfs_qing = &qing_checking;[m
+ [m
+ 	ret = sysfs_create_file(nvmev_vdev->sysfs_root, &nvmev_vdev->sysfs_read_times->attr);[m
+ 	ret = sysfs_create_file(nvmev_vdev->sysfs_root, &nvmev_vdev->sysfs_write_times->attr);[m
+[36m@@ -493,6 +508,8 @@[m [mvoid NVMEV_STORAGE_INIT(struct nvmev_dev *nvmev_vdev)[m
+ 	ret = sysfs_create_file(nvmev_vdev->sysfs_root, &nvmev_vdev->sysfs_debug->attr);[m
+ 	ret = sysfs_create_file(nvmev_vdev->sysfs_root, &nvmev_vdev->sysfs_phfrag->attr);[m
+ 	ret = sysfs_create_file(nvmev_vdev->sysfs_root, &nvmev_vdev->sysfs_chdie->attr);[m
+[32m+[m	[32mret = sysfs_create_file(nvmev_vdev->sysfs_root, &nvmev_vdev->sysfs_hugemap->attr);[m
+[32m+[m	[32mret = sysfs_create_file(nvmev_vdev->sysfs_root, &nvmev_vdev->sysfs_qing->attr);[m
+ }[m
+ [m
+ void NVMEV_STORAGE_FINAL(struct nvmev_dev *nvmev_vdev)[m
+[36m@@ -504,6 +521,8 @@[m [mvoid NVMEV_STORAGE_FINAL(struct nvmev_dev *nvmev_vdev)[m
+ 	sysfs_remove_file(nvmev_vdev->sysfs_root, &nvmev_vdev->sysfs_debug->attr);[m
+ 	sysfs_remove_file(nvmev_vdev->sysfs_root, &nvmev_vdev->sysfs_phfrag->attr);[m
+ 	sysfs_remove_file(nvmev_vdev->sysfs_root, &nvmev_vdev->sysfs_chdie->attr);[m
+[32m+[m	[32msysfs_remove_file(nvmev_vdev->sysfs_root, &nvmev_vdev->sysfs_hugemap->attr);[m
+[32m+[m	[32msysfs_remove_file(nvmev_vdev->sysfs_root, &nvmev_vdev->sysfs_qing->attr);[m
+ [m
+ 	kobject_put(nvmev_vdev->sysfs_root);[m
+ [m
+[36m@@ -962,6 +981,7 @@[m [mstruct list_head *create_list_from_table(struct ssdparams *spp,struct nvmev_ns *[m
+ struct list_head *create_list_from_table_split(struct ssdparams *spp,struct nvmev_ns *ns,struct conv_ftl *conv_ftls,uint64_t num_list){[m
+ 	struct list_head *head;[m
+ 	uint64_t nr_parts = ns->nr_parts;[m
+[32m+[m	[32mprintk(KERN_INFO "num_list : %lld, nr_parts : %lld\n",num_list,nr_parts);[m
+     head = vmalloc(sizeof(*head) * num_list * nr_parts);[m
+     if (!head) {[m
+         pr_err("Failed to allocate memory for list head.\n");[m
+[36m@@ -990,6 +1010,29 @@[m [mstruct list_head *create_list_from_table_split(struct ssdparams *spp,struct nvme[m
+ 		total_real_count++;[m
+ 		if(total_real_count >= split_count){[m
+ 			total_real_count=0;[m
+[32m+[m	[32m/*		if(count!=0){[m
+[32m+[m				[32muint64_t dump_s;[m
+[32m+[m				[32muint64_t dump_e;[m
+[32m+[m				[32mfor(i=0; i<nr_parts;i++){[m
+[32m+[m					[32mint cur_idx = i * num_list + cur_chunk;[m
+[32m+[m					[32muint64_t first = start_lpn;[m
+[32m+[m[41m   [m					[32muint64_t last  = global_lpn - 1;[m
+[32m+[m
+[32m+[m[41m    [m				[32muint64_t start_mod = first % nr_parts;[m
+[32m+[m[41m    [m				[32muint64_t last_mod  = last  % nr_parts;[m
+[32m+[m
+[32m+[m[41m    [m				[32muint64_t s_diff = (i + nr_parts - start_mod) % nr_parts;[m
+[32m+[m[41m   [m				[41m [m	[32mdump_s = first + s_diff;[m
+[32m+[m
+[32m+[m[41m    [m				[32muint64_t e_diff = (last_mod + nr_parts - i) % nr_parts;[m
+[32m+[m[41m    [m				[32mdump_e = last - e_diff;[m
+[32m+[m
+[32m+[m					[32mlpn = generate_lpn(dump_s, dump_e,count,i,-1,-1);[m
+[32m+[m					[32m//printk(KERN_INFO "start : %lld, end: %lld, idx : %i, cur_chunk: %d, input area: %d\n",dump_s,dump_e,i,cur_chunk,cur_idx);[m
+[32m+[m					[32mlist_add_tail(&lpn->list,&head[cur_idx]);[m
+[32m+[m				[32m}[m
+[32m+[m				[32mcount = 0;[m
+[32m+[m			[32m}*/[m
+ 			cur_chunk++;[m
+ 			if(cur_chunk == num_list){[m
+ 				cur_chunk--;[m
+[36m@@ -1027,6 +1070,7 @@[m [mstruct list_head *create_list_from_table_split(struct ssdparams *spp,struct nvme[m
+     				dump_e = last - e_diff;[m
+ [m
+ 					lpn = generate_lpn(dump_s, dump_e,count,i,-1,-1);[m
+[32m+[m					[32m//printk(KERN_INFO "start : %lld, end: %lld, idx : %i, cur_chunk: %d, input area: %d\n",dump_s,dump_e,i,cur_chunk,cur_idx);[m
+ 					list_add_tail(&lpn->list,&head[cur_idx]);[m
+ 				}[m
+ 				count = 0;[m
+[36m@@ -1050,6 +1094,7 @@[m [mstruct list_head *create_list_from_table_split(struct ssdparams *spp,struct nvme[m
+     		uint64_t e_diff = (last_mod + nr_parts - i) % nr_parts;[m
+     		dump_e = last - e_diff;[m
+ 			lpn = generate_lpn(dump_s, dump_e,count,i,-1,-1);[m
+[32m+[m			[32m//printk(KERN_INFO "start : %lld, end: %lld, idx : %i, cur_chunk: %d, input area: %d\n",dump_s,dump_e,i,cur_chunk,cur_idx);[m
+ 			list_add_tail(&lpn->list,&head[cur_idx]);[m
+ 		}[m
+ 	}[m
+[36m@@ -1094,28 +1139,30 @@[m [mstatic void clean_ftl(struct nvmev_dev * dev){[m
+ [m
+ 	struct list_head *active_lba_chunks_list;[m
+ [m
+[32m+[m
+[32m+[m	[32mprintk(KERN_INFO "1\n");[m
+[32m+[m	[32mNVMEV_DISPATCHER_FINAL(dev);[m
+[32m+[m	[32mNVMEV_IO_WORKER_FINAL(dev);[m[41m	[m
+[32m+[m	[32mprintk(KERN_INFO "2\n");[m
+[32m+[m
+ 	struct list_head *lists;[m
+ 	lists = vmalloc(nr_parts * num_lists * sizeof(struct list_head));[m
+     if (!lists) {[m
+       	pr_err("Failed to allocate memory for list head.\n");[m
+ 		return;[m
+     }[m
+[31m-	[m
+[32m+[m
+ 	for (i = 0; i < nr_parts * num_lists; i++)[m
+     	INIT_LIST_HEAD(&lists[i]);[m
+[31m-[m
+[31m-	printk(KERN_INFO "1\n");[m
+[31m-	NVMEV_DISPATCHER_FINAL(dev);[m
+[31m-	NVMEV_IO_WORKER_FINAL(dev);	[m
+[31m-	printk(KERN_INFO "2\n");[m
+ 	[m
+ 	// 1. maptbl을 읽으면서 연속적인 length를 먼저 구함.[m
+ 	uint64_t spoint = 0;[m
+ 	active_lba_chunks_list= create_list_from_table_split(spp,ns,conv_ftls,num_lists);[m
+ [m
+[31m-//	for(i=0; i < num_lists * nr_parts; i ++){[m
+[31m-//		list_sort(NULL, &active_lba_chunks_list[i],compare_by_size);[m
+[31m-//	}[m
+[32m+[m	[32mfor(i=0; i < num_lists * nr_parts; i ++){[m
+[32m+[m		[32mlist_sort(NULL, &active_lba_chunks_list[i],compare_by_size);[m
+[32m+[m	[32m}[m
+[32m+[m	[32mprintk(KERN_INFO "start active : %s\n",(any_active_nonempty(active_lba_chunks_list,num_lists * nr_parts)) ? "have data":"empty");[m
+ [m
+ 	printk(KERN_INFO "1\n");[m
+ 	uint64_t desired_degree = dev->degree_frag;[m
+[36m@@ -1123,14 +1170,12 @@[m [mstatic void clean_ftl(struct nvmev_dev * dev){[m
+     NVMEV_NAMESPACE_INIT(dev);[m
+ 	ns = dev->ns;[m
+ 	conv_ftls = (struct conv_ftl *)ns->ftls;[m
+[31m-    NVMEV_IO_WORKER_INIT(dev);[m
+[31m-    NVMEV_DISPATCHER_INIT(dev);[m
+ [m
+ 	printk(KERN_INFO "2\n");[m
+ 	// 2. 연속적인 LBA를 physical 영역에 degree에 따라 불규칙적으로 배열[m
+ 	// current ns is only 1. later i need fix it => load, checking part also! [m
+ 	struct rewrite_pointer *r;[m
+[31m-	bool restart = false;[m
+[32m+[m	[32mbool restart = true;[m
+ 	lba_chunk_t * regenerate;[m
+ [m
+ 	int count = 0;[m
+[36m@@ -1142,7 +1187,7 @@[m [mstatic void clean_ftl(struct nvmev_dev * dev){[m
+ 	do{[m
+     	lba_chunk_t *lpn, *tmp;[m
+ [m
+[31m-		if((!restart/* && count >= 16 *spp->pgs_per_oneshotpg*/)|| list_empty(&active_lba_chunks_list[cur_index * num_lists + cur_chunk])){[m
+[32m+[m		[32mif((!restart && count >= 2 * spp->pgs_per_oneshotpg)|| list_empty(&active_lba_chunks_list[cur_index * num_lists + cur_chunk])){[m
+ 			count=0;[m
+ 			cur_chunk++;[m
+ 			if(cur_chunk >= num_lists)[m
+[36m@@ -1166,12 +1211,30 @@[m [mstatic void clean_ftl(struct nvmev_dev * dev){[m
+ 			}[m
+ 		}[m
+ [m
+[31m-		restart = false;[m
+[32m+[m		[32m/*restart = false;[m
+[32m+[m[41m   [m		[32mlist_for_each_entry_safe(lpn, tmp, &active_lba_chunks_list[cur_index * num_lists + cur_chunk], list) {[m
+[32m+[m			[32mNVMEV_ASSERT(lpn->idx == cur_index);[m
+[32m+[m			[32mif(count >= 2 * spp->pgs_per_oneshotpg){[m
+[32m+[m				[32mbreak;[m
+[32m+[m			[32m}[m
+[32m+[m			[32mr = phfrag_cleaner(ns, lpn->start_lpn, lpn->end_lpn,desired_degree ,lpn->idx, false,false,&count,num_lists,cur_chunk,&lpn->conti);[m
+[32m+[m			[32mif(r!=NULL){[m
+[32m+[m				[32mlpn->start_lpn = r->startpoint;[m
+[32m+[m				[32mvfree(r);[m
+[32m+[m			[32m}[m
+[32m+[m			[32melse{[m
+[32m+[m				[32mlist_del(&lpn->list);[m
+[32m+[m				[32mvfree(lpn);[m
+[32m+[m			[32m}[m
+[32m+[m		[32m}[m
+[32m+[m
+[32m+[m	[32m} while (restart || any_active_nonempty(active_lba_chunks_list, num_lists * nr_parts));*/[m
+[32m+[m	[32mrestart = false;[m
+     	list_for_each_entry_safe(lpn, tmp, &active_lba_chunks_list[cur_index * num_lists + cur_chunk], list) {[m
+ 			NVMEV_ASSERT(lpn->idx == cur_index);[m
+[31m-//			if(count >= 16 * spp->pgs_per_oneshotpg){[m
+[31m-//				break;[m
+[31m-//			}[m
+[32m+[m			[32mif(count >= 16 * spp->pgs_per_oneshotpg){[m
+[32m+[m				[32mbreak;[m
+[32m+[m			[32m}[m
+ 			r = phfrag_cleaner(ns, lpn->start_lpn, lpn->end_lpn,desired_degree,lists, lpn->idx, false,false,&count,num_lists,cur_chunk,&lpn->conti);[m
+ 			 if(r!=NULL){[m
+ 				if(r->preempt){[m
+[36m@@ -1244,10 +1307,10 @@[m [mstatic void clean_ftl(struct nvmev_dev * dev){[m
+ 	} while (restart || any_active_nonempty(active_lba_chunks_list, num_lists * nr_parts));[m
+ [m
+     printk(KERN_INFO "device's physical fragmentation clean done!-first\n");[m
+[31m-	printk(KERN_INFO "list: %s\n",(any_active_nonempty(lists,num_lists * nr_parts)) ? "have data":"empty");[m
+[31m-	vfree(lists);[m
+ 	printk(KERN_INFO "active : %s\n",(any_active_nonempty(active_lba_chunks_list,num_lists * nr_parts)) ? "have data":"empty");[m
+ 	vfree(active_lba_chunks_list);[m
+[32m+[m[32m    NVMEV_IO_WORKER_INIT(dev);[m
+[32m+[m[32m    NVMEV_DISPATCHER_INIT(dev);[m
+     printk(KERN_INFO "device's physical fragmentation clean done!\n");[m
+ }[m
+ 	/*[m
+[1mdiff --git a/nvmev.h b/nvmev.h[m
+[1mindex 4a6b915..208f221 100644[m
+[1m--- a/nvmev.h[m
+[1m+++ b/nvmev.h[m
+[36m@@ -264,6 +264,8 @@[m [mstruct nvmev_dev {[m
+ 	struct kobj_attribute *sysfs_debug;[m
+ 	struct kobj_attribute *sysfs_phfrag;[m
+ 	struct kobj_attribute *sysfs_chdie;[m
+[32m+[m	[32mstruct kobj_attribute *sysfs_hugemap;[m
+[32m+[m	[32mstruct kobj_attribute *sysfs_qing;[m
+ [m
+ 	unsigned long long *io_unit_stat;[m
+ [m
+[36m@@ -279,6 +281,11 @@[m [mstruct nvmev_dev {[m
+ 	long degree_frag; /*degree of physical fragmentation*/[m
+ 	int max_con;[m
+ 	long num_list;[m
+[32m+[m
+[32m+[m	[32mint hugemap_checker;[m
+[32m+[m	[32mlong conti_counter;[m
+[32m+[m	[32mlong count_page;[m
+[32m+[m	[32muint64_t queueing_wait;[m
+ };[m
+ [m
+ struct nvmev_request {[m
+[36m@@ -292,12 +299,23 @@[m [mstruct nvmev_result {[m
+ 	uint64_t nsecs_target;[m
+ };[m
+ [m
+[32m+[m[32mstruct write_pattern_stats {[m
+[32m+[m[32m    uint64_t prev_lpn;[m
+[32m+[m[32m    uint64_t total_writes;[m
+[32m+[m[32m    uint64_t sequential_writes;[m
+[32m+[m[32m    uint64_t large_jump_writes;[m
+[32m+[m[32m    uint64_t lpn_delta_sum;[m
+[32m+[m	[32mint start;[m
+[32m+[m[32m};[m
+[32m+[m
+ struct nvmev_ns {[m
+ 	uint32_t id;[m
+ 	uint32_t csi;[m
+ 	uint64_t size;[m
+ 	void *mapped;[m
+ [m
+[32m+[m	[32mstruct write_pattern_stats * stats;[m
+[32m+[m
+ 	struct nvmev_dev *p_dev;[m
+ [m
+ 	/*conv ftl or zns or kv*/[m
+[1mdiff --git a/save_load.c b/save_load.c[m
+[1mindex f7cf839..9676263 100644[m
+[1m--- a/save_load.c[m
+[1m+++ b/save_load.c[m
+[36m@@ -54,17 +54,17 @@[m [mstatic inline void victim_line_set_pos(void *a, size_t pos)[m
+ [m
+ void ssd_write_pg(struct nand_page *pg, struct file *file, loff_t *f_pos){[m
+ 	int	ret = kernel_write(file,&pg->nsecs,sizeof(int),f_pos);[m
+[31m-//	if(ret < 0){[m
+[31m-//		printk("Failed to write page nsecs\n");[m
+[31m-//	}[m
+[32m+[m	[32mif(ret < 0){[m
+[32m+[m		[32mprintk("Failed to write page nsecs\n");[m
+[32m+[m	[32m}[m
+ 	ret = kernel_write(file,&pg->status,sizeof(int),f_pos);[m
+[31m-//	if(ret < 0){[m
+[31m-//		printk("Failed to write page status\n");[m
+[31m-//	}[m
+[32m+[m	[32mif(ret < 0){[m
+[32m+[m		[32mprintk("Failed to write page status\n");[m
+[32m+[m	[32m}[m
+ 	ret = kernel_write(file,pg->sec,sizeof(nand_sec_status_t)*pg->nsecs,f_pos);[m
+[31m-//	if(ret < 0){[m
+[31m-//		printk("Failed to write page sec\n");[m
+[31m-//	}[m
+[32m+[m	[32mif(ret < 0){[m
+[32m+[m		[32mprintk("Failed to write page sec\n");[m
+[32m+[m	[32m}[m
+ }[m
+ void ssd_write_blk(struct nand_block *blk, struct file *file, loff_t *f_pos){[m
+ 	int i;[m
+[36m@@ -121,7 +121,6 @@[m [mint save_device(struct nvmev_dev *nvmev_vdev,const char *root)[m
+ 	struct ssdparams * spp;[m
+ [m
+ 	loff_t f_pos;[m
+[31m-	loff_t cur;[m
+ [m
+ 	int q,i,ret;[m
+ 	struct file *file;[m
+[36m@@ -132,6 +131,7 @@[m [mint save_device(struct nvmev_dev *nvmev_vdev,const char *root)[m
+ [m
+ 	unsigned long size;[m
+ 	struct path path;[m
+[32m+[m	[32mloff_t curr;[m
+ [m
+ [m
+ 	ns = nvmev_vdev->ns;[m
+[36m@@ -200,6 +200,8 @@[m [mint save_device(struct nvmev_dev *nvmev_vdev,const char *root)[m
+ 			printk("Failed to write rmap\n");[m
+ 		}[m
+ [m
+[32m+[m		[32mret = kernel_write(file, conv_ftls->page_counter,sizeof(int64_t) * spp->nchs * spp->luns_per_ch, &f_pos);[m
+[32m+[m
+ 		//lines counter save [m
+ 		ret = kernel_write(file,&conv_ftls->lm.tt_lines,sizeof(uint32_t),&f_pos);[m
+ 		if(ret < 0){[m
+[36m@@ -279,7 +281,7 @@[m [mint save_device(struct nvmev_dev *nvmev_vdev,const char *root)[m
+ 				printk("Failed to write full line id\n");[m
+ 			}[m
+ 		}[m
+[31m-[m
+[32m+[m[32m/*[m
+ 		for(i=0; i < spp->tt_pgs; i++){[m
+ 			if(conv_ftls->rmap[i]!=INVALID_LPN){[m
+ 				int cur = 0;[m
+[36m@@ -292,7 +294,33 @@[m [mint save_device(struct nvmev_dev *nvmev_vdev,const char *root)[m
+ 				}[m
+ 			}[m
+ 		}[m
+[32m+[m[32m*/[m
+[32m+[m	[32m}[m
+[32m+[m[32m//storage size save[m
+[32m+[m	[32mret = kernel_write(file,&ns[0].p_dev->config.storage_size,sizeof(unsigned long) ,&f_pos);[m
+[32m+[m	[32mif(ret < 0){[m
+[32m+[m		[32mprintk("Failed to write storage size\n");[m
+[32m+[m	[32m}[m
+[32m+[m
+[32m+[m	[32m//mapped data save[m
+[32m+[m	[32msize = ns[0].p_dev->config.storage_size;[m
+[32m+[m
+[32m+[m	[32mprintk("Storage data saving...\n");[m
+[32m+[m[41m	[m
+[32m+[m	[32mcurr = 0;[m
+[32m+[m	[32mwhile(curr < size){[m
+[32m+[m		[32mret = kernel_write(file,nvmev_vdev->storage_mapped + curr,size - curr,&f_pos);[m
+[32m+[m		[32mif(ret < 0){[m
+[32m+[m			[32mprintk("Failed to write storage\n");[m
+[32m+[m		[32m}[m
+[32m+[m
+[32m+[m		[32mcurr += ret;[m
+[32m+[m
+ 	}[m
+[32m+[m
+[32m+[m
+[32m+[m
+[32m+[m
+ 	filp_close(file,NULL);[m
+ 	printk("Save Done..! Finish!\n");[m
+ 	return 0;[m
+[36m@@ -320,6 +348,7 @@[m [mvoid ssd_read_blk(struct nand_block *blk, struct file *file, loff_t *f_pos){[m
+ 	if(ret < 0){[m
+ 		printk("Failed to read block npgs\n");[m
+ 	}[m
+[32m+[m[32m//	blk->pg = kmalloc(sizeof(struct nand_page) * blk->npgs,GFP_KERNEL);[m
+ 	ret = kernel_read(file,&blk->ipc,sizeof(int),f_pos);[m
+ 	if(ret < 0){[m
+ 		printk("Failed to read block ipc\n");[m
+[36m@@ -400,7 +429,6 @@[m [mint load_device(struct nvmev_dev *nvmev_vdev,const char * root)[m
+ 	struct ssdparams * spp;[m
+ [m
+ 	loff_t f_pos;[m
+[31m-	loff_t cur;[m
+ [m
+ 	struct file *file;[m
+ 	char filename[300];[m
+[36m@@ -408,6 +436,7 @@[m [mint load_device(struct nvmev_dev *nvmev_vdev,const char * root)[m
+ 	int ret,i,w,q;[m
+ 	int wp_id,gc_wp_id;[m
+ 	int id,ipc,vpc,pos;[m
+[32m+[m	[32mloff_t curr;[m
+ [m
+ 	int * array;[m
+ 	int *free_line_id;[m
+[36m@@ -469,33 +498,13 @@[m [mint load_device(struct nvmev_dev *nvmev_vdev,const char * root)[m
+ 		for(w=0; w<spp->nchs;w++){[m
+ 			ssd_read_ch(&(conv_ftls->ssd->ch[w]),spp,file, &f_pos);[m
+ 		}[m
+[32m+[m		[32mprintk("Weak Point Pass(Debug)\n");[m
+ [m
+ 		//write pointer load[m
+ 		ret = kernel_read(file,&conv_ftls->wp,sizeof(struct write_pointer),&f_pos);[m
+ 		if(ret < 0){[m
+ 			printk("Failed to read wp\n");[m
+ 		}[m
+[31m-		int ch_wp;[m
+[31m-		int lun_wp;[m
+[31m-		bool check_point_chdie = false;[m
+[31m-[m
+[31m-		for(lun_wp=0; lun_wp < spp->luns_per_ch; lun_wp++){[m
+[31m-			for(ch_wp=0; ch_wp < spp->nchs; ch_wp++){[m
+[31m-				uint64_t idx = ch_wp * spp->luns_per_ch + lun_wp;[m
+[31m-			 	if(ch_wp == conv_ftls->wp.ch && lun_wp == conv_ftls->wp.lun)[m
+[31m-				{[m
+[31m-					conv_ftls->page_counter[idx] = conv_ftls->wp.pg;[m
+[31m-					check_point_chdie = true;[m
+[31m-				}[m
+[31m-				else if(!check_point_chdie){[m
+[31m-					conv_ftls->page_counter[idx] = conv_ftls->wp.pg - (conv_ftls->wp.pg % spp->pgs_per_oneshotpg) + spp->pgs_per_oneshotpg; [m
+[31m-				}[m
+[31m-				else{[m
+[31m-					conv_ftls->page_counter[idx] = conv_ftls->wp.pg - (conv_ftls->wp.pg % spp->pgs_per_oneshotpg); [m
+[31m-				}[m
+[31m-			}[m
+[31m-		}[m
+[31m-[m
+ [m
+ 		ret = kernel_read(file,&wp_id,sizeof(int),&f_pos);[m
+ 		if(ret < 0){[m
+[36m@@ -535,6 +544,9 @@[m [mint load_device(struct nvmev_dev *nvmev_vdev,const char * root)[m
+ 			printk("Failed to read tt_lines\n");[m
+ 		}[m
+ [m
+[32m+[m		[32mret = kernel_read(file, conv_ftls->page_counter,[m
+[32m+[m[32m    sizeof(int64_t) * spp->nchs * spp->luns_per_ch, &f_pos);[m
+[32m+[m
+ [m
+ 		ret = kernel_read(file,&lm->free_line_cnt,sizeof(uint32_t),&f_pos);[m
+ 		if(ret < 0){[m
+[36m@@ -583,6 +595,7 @@[m [mint load_device(struct nvmev_dev *nvmev_vdev,const char * root)[m
+ 		conv_ftls->lm.victim_line_pq = pqueue_init(spp->tt_lines, victim_line_cmp_pri, victim_line_get_pri,[m
+ 				victim_line_set_pri, victim_line_get_pos, victim_line_set_pos);[m
+ 		//victime line pqueue load[m
+[32m+[m		[32mprintk("Storage is collect mapping\n");[m
+ 		ret = kernel_read(file,&conv_ftls->lm.victim_line_pq->size,sizeof(size_t),&f_pos);[m
+ 		if(ret < 0){[m
+ 			printk("Failed to read pq size\n");[m
+[36m@@ -665,7 +678,7 @@[m [mint load_device(struct nvmev_dev *nvmev_vdev,const char * root)[m
+ 				break;[m
+ [m
+ 		}[m
+[31m-[m
+[32m+[m[32m/*[m
+ 		for(i=0; i < spp->tt_pgs; i++){[m
+ 			if(conv_ftls->rmap[i]!=INVALID_LPN){[m
+ 				int cur = 0;[m
+[36m@@ -678,7 +691,28 @@[m [mint load_device(struct nvmev_dev *nvmev_vdev,const char * root)[m
+ 				}[m
+ 			}[m
+ 		}[m
+[32m+[m[32m*/[m
+[32m+[m	[32m}[m
+[32m+[m
+[32m+[m[32m   //storage size load[m
+[32m+[m	[32mret = kernel_read(file,&size,sizeof(unsigned long),&f_pos);[m
+[32m+[m	[32mif(ret < 0){[m
+[32m+[m		[32mprintk("Failed to read storage size\n");[m
+ 	}[m
+[32m+[m
+[32m+[m	[32m//storage data load[m
+[32m+[m	[32mprintk("Storage data loading..\n");[m
+[32m+[m	[32mcurr=0;[m
+[32m+[m	[32mwhile(curr < size){[m
+[32m+[m		[32mret = kernel_read(file,nvmev_vdev->storage_mapped + curr, size - curr,&f_pos);[m
+[32m+[m		[32mif(ret < 0){[m
+[32m+[m			[32mprintk("Failed to read storage\n");[m
+[32m+[m		[32m}[m
+[32m+[m
+[32m+[m		[32mcurr += ret;[m
+[32m+[m	[32m}[m
+[32m+[m[41m	[m
+[32m+[m
+ 	filp_close(file, NULL);[m
+ 	printk("Load Done..! Finish!\n");[m
+ [m
+[1mdiff --git a/ssd.c b/ssd.c[m
+[1mindex 43b5972..eec0cf5 100644[m
+[1m--- a/ssd.c[m
+[1m+++ b/ssd.c[m
+[36m@@ -407,9 +407,20 @@[m [muint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)[m
+ 		if(ssd->checking && !lun->first_io){[m
+ 			uint64_t delay = nand_stime - cmd_stime;[m
+ 			if(delay > 0){[m
+[32m+[m[32m//				printk(KERN_INFO "(%d,%d) delay : %lld\n",ppa->g.ch, ppa->g.lun,delay);[m
+ 				ssd->ch_die_counter++;[m
+ 				ssd->ch_die_latency+= delay;[m
+ 			}	[m
+[32m+[m[32m//			else{[m
+[32m+[m[32m//				printk(KERN_INFO "(%d,%d) no delay\n",ppa->g.ch, ppa->g.lun);[m
+[32m+[m[32m//			}[m
+[32m+[m
+[32m+[m			[32mif(delay < 0) delay = 0;[m
+[32m+[m
+[32m+[m			[32mif(ncmd->arrive_time < 0 || ncmd->arrive_time > delay){[m
+[32m+[m				[32mncmd->arrive_time = delay;[m
+[32m+[m			[32m}[m
+[32m+[m
+ 			lun->first_io=true;	[m
+ 		}[m
+ [m
+[1mdiff --git a/ssd.h b/ssd.h[m
+[1mindex 3205b96..132e66b 100644[m
+[1m--- a/ssd.h[m
+[1m+++ b/ssd.h[m
+[36m@@ -135,6 +135,7 @@[m [mstruct nand_cmd {[m
+ 	uint64_t stime; /* Coperd: request arrival time */[m
+ 	bool interleave_pci_dma;[m
+ 	struct ppa *ppa;[m
+[32m+[m	[32mint64_t arrive_time;[m
+ };[m
+ [m
+ struct buffer {[m
+[1mdiff --git a/ssd_config.c b/ssd_config.c[m
+[1mindex a21f82e..d515a73 100644[m
+[1m--- a/ssd_config.c[m
+[1m+++ b/ssd_config.c[m
+[36m@@ -20,8 +20,8 @@[m [mvoid load_conv_configs(struct ftl_configs *ftl_cfgs)[m
+ 	ftl_cfgs->MDTS = 6;[m
+ 	ftl_cfgs->CELL_MODE = CELL_MODE_MLC;[m
+ [m
+[31m-	ftl_cfgs->SSD_PARTITIONS = 4;[m
+[31m-	ftl_cfgs->NAND_CHANNELS = 8;[m
+[32m+[m	[32mftl_cfgs->SSD_PARTITIONS = 4; //original =4[m
+[32m+[m	[32mftl_cfgs->NAND_CHANNELS = 8; //original =8[m
+ 	ftl_cfgs->LUNS_PER_NAND_CH = 2;[m
+ 	ftl_cfgs->PLNS_PER_LUN = 1;[m
+ 	ftl_cfgs->FLASH_PAGE_SIZE = KB(32);[m
